@@ -2,7 +2,6 @@ from flask import Flask, render_template, request, jsonify
 from hybrid_bot_engine import AIONHybridBot
 import os
 from dotenv import load_dotenv
-import json
 from datetime import datetime
 
 load_dotenv()
@@ -16,20 +15,28 @@ def dashboard():
     trades = bot.get_recent_trades()
     progress = bot.get_progress_data()
     
+    # التحقق من اتصال البوت
+    connection_status = "✅ متصل" if bot.client else "❌ غير متصل"
+    
     return render_template(
         "dashboard.html",
         stats=stats,
         trades=trades,
         progress=progress,
-        balance=bot.balance
+        balance=bot.balance,
+        connection_status=connection_status,
+        has_keys=bot.api_key is not None
     )
 
 @app.route('/start', methods=['POST'])
 def start_bot():
     data = request.json
-    api_key = data.get('api_key') or os.getenv('BINANCE_API_KEY')
-    api_secret = data.get('api_secret') or os.getenv('BINANCE_API_SECRET')
+    api_key = data.get('api_key', '').strip()
+    api_secret = data.get('api_secret', '').strip()
     mode = data.get('mode', 'DEMO')
+    
+    if not api_key or not api_secret:
+        return jsonify({"error": "❌ يرجى إدخال كلا المفتاحين"}), 400
     
     if bot.set_keys(api_key, api_secret, mode):
         result = bot.start_trading()
@@ -37,10 +44,11 @@ def start_bot():
             "status": result,
             "mode": mode,
             "target": f"${bot.target_balance}",
-            "timeline": f"{bot.days_remaining} يوم"
+            "timeline": f"{bot.days_remaining} يوم",
+            "has_keys": True
         })
     else:
-        return jsonify({"error": "❌ فشل في تعيين المفاتيح"}), 400
+        return jsonify({"error": "❌ فشل في تعيين المفاتيح - تحقق من المفاتيح واتصالك بالإنترنت"}), 400
 
 @app.route('/stop', methods=['POST'])
 def stop_bot():
@@ -97,34 +105,25 @@ def test_api_keys():
                 "details": "المفاتيح لا يمكن أن تكون فارغة"
             })
         
-        if len(api_key) < 20:
-            return jsonify({
-                "success": False, 
-                "message": "❌ مفتاح API قصير جداً",
-                "details": f"الطول الحالي: {len(api_key)} - يجب أن يكون 20 حرفاً على الأقل"
-            })
-            
-        if len(api_secret) < 20:
-            return jsonify({
-                "success": False,
-                "message": "❌ مفتاح Secret قصير جداً", 
-                "details": f"الطول الحالي: {len(api_secret)} - يجب أن يكون 20 حرفاً على الأقل"
-            })
-        
         # اختبار الاتصال الفعلي
         from binance.client import Client
         client = Client(api_key, api_secret, testnet=(mode=='DEMO'))
+        
+        # اختبار جلب سعر حقيقي
+        ticker = client.get_symbol_ticker(symbol="BTCUSDT")
+        btc_price = float(ticker['price'])
         
         # اختبار الحساب
         account_info = client.get_account()
         
         return jsonify({
             "success": True,
-            "message": "✅ المفاتيح صحيحة والاتصال ناجح!",
+            "message": f"✅ المفاتيح صحيحة - سعر BTC: ${btc_price:,.2f}",
             "details": {
                 "can_trade": account_info.get('canTrade', False),
                 "account_type": "Testnet" if mode == "DEMO" else "Real",
                 "balances_count": len(account_info.get('balances', [])),
+                "btc_price": btc_price,
                 "server_time": client.get_server_time()['serverTime']
             }
         })
@@ -138,9 +137,9 @@ def test_api_keys():
         elif "Signature" in error_msg:
             details = "مفتاح Secret غير صحيح - تأكد من نسخه بشكل كامل"
         elif "restrictions" in error_msg.lower():
-            details = "قيود جغرافية - قد تحتاج VPN أو سيرفر في منطقة أخرى"
+            details = "قيود جغرافية - قد تحتاج VPN"
         elif "connection" in error_msg.lower():
-            details = "مشكلة في الاتصال - تحقق من الإنترنت أو جرب لاحقاً"
+            details = "مشكلة في الاتصال - تحقق من الإنترنت"
         
         return jsonify({
             "success": False,
@@ -149,19 +148,18 @@ def test_api_keys():
             "error": error_msg
         })
 
-@app.route('/debug-info')
-def get_debug_info():
-    """معلومات التصحيح"""
-    debug_info = {
-        "bot_running": bot.running,
-        "client_connected": bot.client is not None,
-        "total_trades": len(bot.trades),
-        "live_trades": len(bot.live_trades),
-        "last_trade_time": bot.trades[-1]['timestamp'] if bot.trades else "لا توجد صفقات",
-        "current_balance": bot.balance,
-        "api_keys_set": bot.api_key is not None and bot.api_secret is not None
-    }
-    return jsonify(debug_info)
+@app.route('/clear-keys', methods=['POST'])
+def clear_keys():
+    """مسح المفاتيح المحفوظة"""
+    try:
+        if os.path.exists(bot.keys_file):
+            os.remove(bot.keys_file)
+        bot.api_key = None
+        bot.api_secret = None
+        bot.client = None
+        return jsonify({"status": "✅ تم مسح المفاتيح"})
+    except Exception as e:
+        return jsonify({"error": f"❌ خطأ في مسح المفاتيح: {e}"})
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
