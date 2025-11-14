@@ -15,8 +15,9 @@ def dashboard():
     trades = bot.get_recent_trades()
     progress = bot.get_progress_data()
     
-    # التحقق من اتصال البوت
+    # التحقق من اتصال البوت والمفاتيح
     connection_status = "✅ متصل" if bot.client else "❌ غير متصل"
+    has_keys = bot.api_key is not None
     
     return render_template(
         "dashboard.html",
@@ -25,7 +26,8 @@ def dashboard():
         progress=progress,
         balance=bot.balance,
         connection_status=connection_status,
-        has_keys=bot.api_key is not None
+        has_keys=has_keys,
+        saved_api_key=bot.api_key[:8] + "..." if bot.api_key else None
     )
 
 @app.route('/start', methods=['POST'])
@@ -34,6 +36,12 @@ def start_bot():
     api_key = data.get('api_key', '').strip()
     api_secret = data.get('api_secret', '').strip()
     mode = data.get('mode', 'DEMO')
+    
+    # إذا كانت المفاتيح موجودة مسبقاً، استخدامها
+    if not api_key and bot.api_key:
+        api_key = bot.api_key
+    if not api_secret and bot.api_secret:
+        api_secret = bot.api_secret
     
     if not api_key or not api_secret:
         return jsonify({"error": "❌ يرجى إدخال كلا المفتاحين"}), 400
@@ -45,7 +53,8 @@ def start_bot():
             "mode": mode,
             "target": f"${bot.target_balance}",
             "timeline": f"{bot.days_remaining} يوم",
-            "has_keys": True
+            "has_keys": True,
+            "keys_saved": True
         })
     else:
         return jsonify({"error": "❌ فشل في تعيين المفاتيح - تحقق من المفاتيح واتصالك بالإنترنت"}), 400
@@ -98,6 +107,12 @@ def test_api_keys():
         api_secret = data.get('api_secret', '').strip()
         mode = data.get('mode', 'DEMO')
         
+        # إذا كانت المفاتيح محفوظة مسبقاً
+        if not api_key and bot.api_key:
+            api_key = bot.api_key
+        if not api_secret and bot.api_secret:
+            api_secret = bot.api_secret
+        
         if not api_key or not api_secret:
             return jsonify({
                 "success": False,
@@ -109,21 +124,28 @@ def test_api_keys():
         from binance.client import Client
         client = Client(api_key, api_secret, testnet=(mode=='DEMO'))
         
-        # اختبار جلب سعر حقيقي
-        ticker = client.get_symbol_ticker(symbol="BTCUSDT")
-        btc_price = float(ticker['price'])
+        # اختبار جلب أسعار حقيقية متعددة
+        symbols = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT"]
+        prices = {}
+        
+        for symbol in symbols:
+            try:
+                ticker = client.get_symbol_ticker(symbol=symbol)
+                prices[symbol] = float(ticker['price'])
+            except:
+                prices[symbol] = "غير متاح"
         
         # اختبار الحساب
         account_info = client.get_account()
         
         return jsonify({
             "success": True,
-            "message": f"✅ المفاتيح صحيحة - سعر BTC: ${btc_price:,.2f}",
+            "message": f"✅ المفاتيح صحيحة - اتصال ناجح بـ {len([p for p in prices.values() if isinstance(p, float)])}/5 عملات",
             "details": {
                 "can_trade": account_info.get('canTrade', False),
                 "account_type": "Testnet" if mode == "DEMO" else "Real",
                 "balances_count": len(account_info.get('balances', [])),
-                "btc_price": btc_price,
+                "prices": prices,
                 "server_time": client.get_server_time()['serverTime']
             }
         })
@@ -160,6 +182,15 @@ def clear_keys():
         return jsonify({"status": "✅ تم مسح المفاتيح"})
     except Exception as e:
         return jsonify({"error": f"❌ خطأ في مسح المفاتيح: {e}"})
+
+@app.route('/get-saved-keys', methods=['GET'])
+def get_saved_keys():
+    """الحصول على حالة المفاتيح المحفوظة"""
+    return jsonify({
+        "has_saved_keys": bot.api_key is not None,
+        "keys_preview": bot.api_key[:8] + "..." if bot.api_key else None,
+        "mode": bot.mode
+    })
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
